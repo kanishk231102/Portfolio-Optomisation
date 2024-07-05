@@ -1,0 +1,122 @@
+import yfinance as yf
+import pandas as pd
+from datetime import datetime, timedelta
+import numpy as np
+from scipy.optimize import minimize
+from fredapi import Fred
+import certifi
+import ssl
+import matplotlib.pyplot as plt
+
+# Configure SSL context to use certifi's bundle
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# Defining tickers and timerange
+tickers = ['SPY', '^NSEBANK', '^NSEI', 'BND', 'GLD', 'QQQ', 'VTI']
+
+end_date = datetime.today()  # set the end date to today
+start_date = end_date - timedelta(days=5*365)
+
+print(start_date)  # start date set 5 years ago
+
+# Download adjusted and closed prices for the portfolio
+adj_close_df = pd.DataFrame()  # created an empty dataframe to store adjusted closed price
+high_low_df = pd.DataFrame()  # created an empty dataframe to store high and low prices
+for ticker in tickers:
+    data = yf.download(ticker, start=start_date, end=end_date)
+    adj_close_df[ticker] = data['Adj Close']
+    high_low_df[ticker + '_High'] = data['High']
+    high_low_df[ticker + '_Low'] = data['Low']
+print(adj_close_df)  # to display the data frame
+
+# calculating lognormal returns for each variable
+log_returns = np.log(adj_close_df / adj_close_df.shift(1))
+log_returns = log_returns.dropna()
+
+# calculating covariance matrix
+cov_matrix = log_returns.cov() * 252
+print(cov_matrix)
+
+# calculating portfolio performance metrics
+def standard_deviation(weights, cov_matrix):
+    variance = weights.T @ cov_matrix @ weights
+    return np.sqrt(variance)
+
+# calculating the expected return
+def expected_return(weights, log_returns):
+    return np.sum(log_returns.mean() * weights) * 252
+
+# calculating the Sharpe ratio
+def sharpe_ratio(weights, log_returns, cov_matrix, risk_free_rate):
+    return (expected_return(weights, log_returns) - risk_free_rate) / standard_deviation(weights, cov_matrix)
+
+# setting risk-free rate
+risk_free_rate = 0.02
+
+fred = Fred(api_key='52a728ce828a892064f203cf7f4a618d'.strip())
+ten_year_treasury_rate = fred.get_series_latest_release('GS10') / 100
+risk_free_rate = ten_year_treasury_rate.iloc[-1]
+print(risk_free_rate)
+
+# Optimize the portfolio
+def negative_sharpe_ratio(weights, log_returns, cov_matrix, risk_free_rate):
+    return -sharpe_ratio(weights, log_returns, cov_matrix, risk_free_rate)
+
+constraints = {'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1}
+bounds = tuple((0, 1) for _ in range(len(tickers)))
+initial_weights = np.array([1/len(tickers)]*len(tickers))
+
+optimized_results = minimize(
+    negative_sharpe_ratio,
+    initial_weights,
+    args=(log_returns, cov_matrix, risk_free_rate),
+    method='SLSQP',
+    constraints=constraints,
+    bounds=bounds
+)
+optimal_weights = optimized_results.x
+
+for ticker, weight in zip(tickers, optimal_weights):
+    print(f"{ticker}: {weight:.4f}")
+
+optimal_portfolio_return = expected_return(optimal_weights, log_returns)
+optimal_portfolio_volatility = standard_deviation(optimal_weights, cov_matrix)
+optimal_sharpe_ratio = sharpe_ratio(optimal_weights, log_returns, cov_matrix, risk_free_rate)
+
+print(f"Expected Annual Return: {optimal_portfolio_return:.4f}")
+print(f"Expected Volatility: {optimal_portfolio_volatility:.4f}")
+print(f"Sharpe Ratio: {optimal_sharpe_ratio:.4f}")
+
+# Plotting the optimized portfolio weights
+plt.figure(figsize=(10, 6))
+plt.bar(tickers, optimal_weights)
+plt.xlabel('Assets')
+plt.ylabel('Optimal Weights')
+plt.title('Optimal Portfolio Weights')
+plt.show()
+
+# Plotting the high and low prices per year
+high_low_df['Year'] = high_low_df.index.year
+annual_high_low = high_low_df.groupby('Year').agg({col: 'max' if 'High' in col else 'min' for col in high_low_df.columns if col != 'Year'})
+
+annual_high_low.plot(figsize=(14, 8))
+plt.title('Annual High and Low Prices')
+plt.xlabel('Year')
+plt.ylabel('Price')
+plt.show()
+
+# Hypothetical return on $1000 investment
+initial_investment = 1000
+investment_df = adj_close_df.copy()
+
+for ticker in tickers:
+    investment_df[ticker] = initial_investment / adj_close_df[ticker].iloc[0] * adj_close_df[ticker]
+
+investment_df['Total'] = investment_df.sum(axis=1)
+
+plt.figure(figsize=(14, 8))
+plt.plot(investment_df.index, investment_df['Total'])
+plt.title('Hypothetical $1000 Investment Over 5 Years')
+plt.xlabel('Date')
+plt.ylabel('Portfolio Value ($)')
+plt.show()
